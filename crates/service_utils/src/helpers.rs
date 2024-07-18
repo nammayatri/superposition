@@ -1,18 +1,23 @@
 use crate::service::types::AppState;
-use actix_web::{error::ErrorInternalServerError, web::Data, Error};
+use actix_web::{error::ErrorInternalServerError, http::StatusCode, Error, web::Data};
 use anyhow::anyhow;
 use jsonschema::{error::ValidationErrorKind, ValidationError};
 use log::info;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::de::{self, IntoDeserializer};
-use serde_json::{Map, Value};
+use serde::{
+        de::{self, IntoDeserializer},
+        Deserialize, Serialize,
+    };
+use serde_json::{json, Map, Value};
 use std::{
     env::VarError,
     fmt::{self, Display},
     str::FromStr,
 };
+use std::collections::HashMap;
 use superposition_types::{result, Condition};
+use crate::service::types::Tenant;
 
 const CONFIG_TAG_REGEX: &str = "^[a-zA-Z0-9_-]{1,64}$";
 
@@ -401,3 +406,84 @@ pub fn parse_config_tags(
         }
     }
 }
+
+//TODO: Refactor the code below.
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TypeValidationResponse {
+    result: bool,
+}
+
+pub async fn validate_inputs(
+    key: &str,
+    value: &serde_json::Value,
+    _schema: &serde_json::Map<String, Value>, //Added In case needed in future.
+    tenan: Tenant,
+) -> Result<bool, Error> {
+    // Calling type validation API of validate type of the key.
+
+    let nyhost: String =
+        get_from_env_unsafe("TYPE_CHECK_HASHMAP").expect("TYPE_CHECK_HASHMAP is not set");
+    log::info!("TYPE_CHECK_HASHMAP: {nyhost}");
+    let hashmap: HashMap<String, String> = serde_json::from_str(&nyhost)
+        .expect("Failed to deserialize JSON string to HashMap");
+
+    log::info!("HashMap: {:?}", hashmap);
+    let tenant = &tenan.0;
+    let nyurl = if hashmap.contains_key(tenant) {
+    let host_url = hashmap.get(tenant).unwrap();
+        format!("{host_url}/internal/typeCheck") // TODO:Change endpoints to master path
+    } else {
+        "null".to_string()
+    };
+
+    if nyurl == "null".to_string() {
+        return Ok(true);
+    }
+
+    let nyclient = reqwest::Client::new();
+    let nypayload = json!({
+        "key": key,
+        "value": value
+    });
+    let token: String = get_from_env_unsafe("TYPE_CHECK_TOKEN")
+        .expect("Authentication token not found for type validation API.");
+    let ny_response_res = nyclient
+        .post(&nyurl)
+        .json(&nypayload)
+        .header("Authorization", token)
+        .send()
+        .await
+        .map_err(|e| e.to_string());
+
+    let response = match ny_response_res {
+        Ok(response) => response,
+        Err(e) => {
+            log::error!("Failed to call nammayatri backend: {e}");
+            return Err(ErrorInternalServerError(
+                json!({"message": "Failed to call nammayatri backend"}),
+            )
+            .into());
+        }
+    };
+
+    let decoded_resp_res = match response.status() {
+            StatusCode::OK => response.json::<TypeValidationResponse>().await.map_err(|e| e.to_string()),
+            error_code => return Err(ErrorInternalServerError(json!({
+                "message": format!("Failed to decode response from nammayatri backend, errorCode: {}", error_code),
+                })).into()),
+        };
+
+    let decoded_resp = match decoded_resp_res {
+        Ok(result) => result,
+        Err(err) => {
+            log::info!("Failed to decode result from nammayatri backend");
+            return Err(ErrorInternalServerError(
+                    json!({"message": &("Failed to decode result from nammayatri backend ".to_string() + &err)}),
+                ).into());
+        }
+    };
+    return Ok(decoded_resp.result);
+    // End of type validation API call
+}
+

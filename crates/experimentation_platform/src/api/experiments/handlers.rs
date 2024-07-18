@@ -13,13 +13,13 @@ use diesel::{
     ExpressionMethods, PgConnection, QueryDsl, RunQueryDsl,
 };
 
-use service_utils::helpers::{construct_request_headers, generate_snowflake_id, request};
+use service_utils::helpers::{construct_request_headers, generate_snowflake_id, request, validate_inputs};
 
 use reqwest::{Method, Response, StatusCode};
 use service_utils::service::types::{
     AppHeader, AppState, CustomHeaders, DbConnection, Tenant,
 };
-use superposition_macros::{bad_argument, response_error, unexpected_error};
+use superposition_macros::{bad_argument, response_error, unexpected_error, validation_error};
 use superposition_types::{
     result as superposition, Condition, Exp, Overrides, SuperpositionUser, User,
 };
@@ -148,6 +148,26 @@ async fn create(
 ) -> superposition::Result<HttpResponse> {
     use crate::db::schema::experiments::dsl::experiments;
     let mut variants = req.variants.to_vec();
+    println!("printing the variants here {:?}", variants);
+    for variant in &mut variants {
+        let overrides: &Map<String, Value> = &variant.overrides.clone().into_inner();
+        for (key, value) in overrides.iter() {
+            let validation_result =
+                validate_inputs(key, value, &Map::new(), tenant.clone()).await;
+            let valid = match validation_result {
+                Ok(result) => result,
+                Err(e) => {
+                    log::info!("Failed to validate inputs due to following error: {e}");
+                    return Err(unexpected_error!("Failed to validate inputs due to error {:?}. check log info for more info.", e));
+                }
+            };
+            if !valid {
+                return Err(validation_error!(
+                    "Type validation failed for {:?}. Please enter correct type and try again.",key
+                ));
+            }
+        }
+    }
     let DbConnection(mut conn) = db_conn;
 
     // Checking if experiment has exactly 1 control variant, and
@@ -599,6 +619,27 @@ async fn update_overrides(
 
     let payload = req.into_inner();
     let variants = payload.variants;
+
+    for variant in &variants {
+        let overrides: &Map<String, Value> = &variant.overrides.clone().into_inner();
+        for (key, value) in overrides.iter() {
+            let validation_result =
+                validate_inputs(key, value, &Map::new(), tenant.clone()).await;
+            let valid = match validation_result {
+                Ok(result) => result,
+                Err(e) => {
+                    log::info!("Failed to validate inputs due to following error: {e}");
+                    return Err(unexpected_error!("Failed to validate inputs due to error {:?}. check log info for more info.", e));
+                }
+            };
+            if !valid {
+                return Err(validation_error!(
+                    "Type validation failed for {:?}. Please enter correct type and try again.",key
+                ));
+            }
+        }
+    }
+        
 
     let first_variant = variants.first().ok_or(bad_argument!(
         "Variant not found in request. Provide at least one entry in variant's list",

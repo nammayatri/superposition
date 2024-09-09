@@ -1,7 +1,7 @@
 extern crate base64;
 use super::types::CreateReq;
 use service_utils::{
-    helpers::{parse_config_tags, validation_err_to_str},
+    helpers::{parse_config_tags, validation_err_to_str, validate_inputs},
     service::types::{AppHeader, AppState, CustomHeaders, DbConnection},
 };
 
@@ -26,7 +26,7 @@ use crate::{
 use actix_web::{
     delete, get, put,
     web::{self, Data, Json, Path},
-    HttpResponse, Scope,
+    HttpRequest, HttpResponse, Scope,
 };
 use chrono::Utc;
 use diesel::{
@@ -40,11 +40,13 @@ use serde_json::{from_value, Map, Value};
 pub fn endpoints() -> Scope {
     Scope::new("").service(create).service(get).service(delete)
 }
+use service_utils::service::types::Tenant;
 
 #[put("/{key}")]
 async fn create(
     state: Data<AppState>,
     key: web::Path<DefaultConfigKey>,
+    reqs: HttpRequest,
     custom_headers: CustomHeaders,
     request: web::Json<CreateReq>,
     db_conn: DbConnection,
@@ -78,6 +80,28 @@ async fn create(
             let schema = req
                 .schema
                 .map_or_else(|| default_config_row.schema, Value::Object);
+            let tenant = reqs
+                .headers()
+                .get("x-tenant")
+                .and_then(|header_value| header_value.to_str().ok())
+                .map(|val: &str| val.to_string())
+                .unwrap();
+
+            let validation_result =
+                validate_inputs(&key, &val, &Map::new(), Tenant(tenant)).await;
+            let valid = match validation_result {
+                Ok(result) => result,
+                Err(e) => {
+                    log::info!("Failed to validate inputs due to following error: {e}");
+                    return Err(unexpected_error!("Failed to validate inputs due to error {:?}. check log info for more info.", e));
+                }
+            };
+
+            if !valid {
+                return Err(validation_error!(
+                    "Type validation failed for {:?}. Please enter correct type and try again.",key
+                ));
+            }
             let f_name = if req.function_name == Some(Value::Null) {
                 None
             } else {
@@ -93,13 +117,39 @@ async fn create(
         }
         Err(superposition::AppError::DbError(diesel::NotFound)) => {
             match (req.value, req.schema) {
-                (Some(val), Some(schema)) => (
+                (Some(val), Some(schema)) => {
+                                        let tenant = reqs
+                                            .headers()
+                                            .get("x-tenant")
+                                            .and_then(|header_value| header_value.to_str().ok())
+                                            .map(|val: &str| val.to_string())
+                                            .unwrap();
+                    
+                                        let validation_result =
+                                            validate_inputs(&key, &val, &Map::new(), Tenant(tenant)).await;
+                                        let valid = match validation_result {
+                                            Ok(result) => result,
+                                            Err(e) => {
+                                                log::info!(
+                                                    "Failed to validate inputs due to following error: {e}"
+                                                );
+                                                return Err(unexpected_error!("Failed to validate inputs due to error {:?}. check log info for more info.", e));
+                                            }
+                                        };
+                    
+                                        if !valid {
+                                            return Err(validation_error!(
+                                                "Type validation failed for {:?}. Please enter correct type and try again.",key
+                                            ));
+                                        };
+                                        (
                     val,
                     Value::Object(schema),
                     func_name,
                     Utc::now(),
                     user.get_email(),
-                ),
+                )
+                    }
                 _ => {
                     log::error!("No record found for {key}.");
                     return Err(bad_argument!("No record found for {}", key));

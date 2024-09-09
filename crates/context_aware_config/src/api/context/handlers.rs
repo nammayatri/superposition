@@ -39,7 +39,7 @@ use diesel::{
 };
 use jsonschema::{Draft, JSONSchema, ValidationError};
 use serde_json::{from_value, json, Map, Value};
-use service_utils::helpers::{parse_config_tags, validation_err_to_str};
+use service_utils::helpers::{parse_config_tags, validation_err_to_str, validate_inputs};
 use service_utils::service::types::DbConnection;
 use std::collections::HashMap;
 use superposition_types::{SuperpositionUser, User};
@@ -342,6 +342,25 @@ async fn put_handler(
     user: User,
     tenant: Tenant,
 ) -> superposition::Result<HttpResponse> {
+
+    for (k, v) in req.r#override.clone().into_inner().iter() {
+        let type_validation_result = validate_inputs(k, v, &Map::new(), tenant.clone()).await;
+        let valid = match type_validation_result {
+            Ok(result) => result,
+            Err(e) => {
+                log::info!("Failed to validate inputs due to following error: {e}");
+
+                return Err(unexpected_error!(
+                    "Failed to validate inputs due to error {:?} check log info for more info.", e
+                ));
+            }
+        };
+        if !valid {
+            return Err(validation_error!(
+                "type validation failed for {:?}. Please enter correct type and try again.",k
+            ));
+        }
+    }
     let tags = parse_config_tags(custom_headers.config_tags)?;
     db_conn.transaction::<_, superposition::AppError, _>(|transaction_conn| {
         let put_response = put(req, transaction_conn, true, &user, &state, &tenant)
@@ -399,6 +418,25 @@ async fn update_override_handler(
     user: User,
     tenant: Tenant,
 ) -> superposition::Result<HttpResponse> {
+
+    for (k, v) in req.r#override.clone().into_inner().iter() {
+        let type_validation_result = validate_inputs(k, v, &Map::new(), tenant.clone()).await;
+        let valid = match type_validation_result {
+            Ok(result) => result,
+            Err(e) => {
+                log::info!("Failed to validate inputs due to following error: {e}");
+
+                return Err(unexpected_error!(
+                    "Failed to validate inputs due to error {:?} check log info for more info.", e
+                ));
+            }
+        };
+        if !valid {
+            return Err(validation_error!(
+                "type validation failed for {:?}. Please enter correct type and try again.",k
+            ));
+        }
+    }
     let tags = parse_config_tags(custom_headers.config_tags)?;
     db_conn.transaction::<_, superposition::AppError, _>(|transaction_conn| {
         let override_resp =
@@ -672,12 +710,42 @@ async fn bulk_operations(
     tenant: Tenant,
 ) -> superposition::Result<HttpResponse> {
     use contexts::dsl::contexts;
+    // let reqs_clone = reqs.clone();
     let DbConnection(mut conn) = db_conn;
     let tags = parse_config_tags(custom_headers.config_tags)?;
 
     let mut response = Vec::<ContextBulkResponse>::new();
+    let req_ = reqs.into_inner();
+
+    for action in req_.clone().into_iter() {
+        match action {
+            ContextAction::Put(put_req) => {
+                for (k, v) in put_req.r#override.clone().into_inner().iter() {
+                    let type_validation_result =
+                        validate_inputs(k, v, &Map::new(), tenant.clone()).await;
+                    let valid = match type_validation_result {
+                        Ok(result) => result,
+                        Err(e) => {
+                            log::info!(
+                                "Failed to validate inputs due to following error: {e}"
+                            );
+                            return Err(unexpected_error!(
+                                "Failed to validate inputs due to error {:?} check log info for more info.", e
+                            ));
+                        }
+                    };
+                    if !valid {
+                        return Err(validation_error!(
+                            "type validation failed for {:?}. Please enter correct type and try again.", k
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     conn.transaction::<_, superposition::AppError, _>(|transaction_conn| {
-        for action in reqs.into_inner().into_iter() {
+        for action in req_.into_iter() {
             match action {
                 ContextAction::Put(put_req) => {
                     let put_resp = put(
